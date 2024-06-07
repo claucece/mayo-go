@@ -22,8 +22,9 @@ const (
 
 	N = 66 // The number of variables in each of the multiquadratic polynomials of the PK.
 	M = 64 // The number of multiquadratic polynimials, which all-together are the PK. Always a multiple of 32.
-	O = 8  // The dimension of the oil space. For MAYO, this is < m, which is different than UOV.
-	K = 9  // The whipping parameter, to be used on signing to get enough degrees of freedom. For 8 * 9 = 72, which is closer to M.
+	O = 8  // The dimension of the oil space. For MAYO, this is < m, which is different than UOV. Note that using this
+	// will mean that we have less degrees of freedom to generate signatures, so we will use it with k.
+	K = 9 // The whipping parameter, to be used on signing to get enough degrees of freedom. For 8 * 9 = 72, which is closer to M.
 
 	V = N - O // Aux param for the matrices
 
