@@ -831,12 +831,16 @@ func Sign(msg []byte, sk *PrivateKey, rand io.Reader) ([]byte, error) {
 func main() {
 	fmt.Println("Hello, MAYO 1!")
 
-	pk, sk, err := GenerateExpandedKeyPair(nil)
+	_, sk, err := GenerateExpandedKeyPair(nil)
 	if err != nil {
 		panic(err)
 	}
 
 	// Prints public and private key
-	fmt.Printf("%+v\n", sk)
-	fmt.Printf("%+v\n", pk)
+	//fmt.Printf("%+v\n", sk)
+	//fmt.Printf("%+v\n", pk)
+
+	msg := []byte("Some message")
+	sig, _ := Sign(msg, sk, nil)
+	fmt.Printf("%+v\n", sig)
 }
