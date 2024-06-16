@@ -141,8 +141,8 @@ func mulAddMatTran(acc []uint64, m1 []uint8, m2 []uint64) {
 	for r := 0; r < O; r++ {
 		for c := 0; c < V; c++ {
 			table := genMultTable(m1[c*O+r])
-			for k := 0; k < V; k++ {
-				mulAddPackedIn(acc[W*(r*V+k):], m2[W*(c*V+k):], table, W)
+			for k := 0; k < O; k++ {
+				mulAddPackedIn(acc[W*(r*O+k):], m2[W*(c*O+k):], table, W)
 			}
 		}
 	}
@@ -301,4 +301,13 @@ func GenerateExpandedKeyPair(rand io.Reader) (*PublicKey, *PrivateKey, error) {
 
 func main() {
 	fmt.Println("Hello, MAYO 1!")
+
+	pk, sk, err := GenerateExpandedKeyPair(nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// Prints public and private key
+	fmt.Printf("%+v\n", sk)
+	fmt.Printf("%+v\n", pk)
 }
