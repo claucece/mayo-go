@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	cryptoRand "crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 
@@ -40,6 +42,12 @@ const (
 
 	DigestSize = 32
 	SaltSize   = 24
+	SigSize    = (K*N+1)/2 + SaltSize
+
+	PublicKeySeedSize = 16
+	KeySeedSize       = 24
+	PrivateKeySize    = KeySeedSize
+	PublicKeySize     = PublicKeySeedSize + P3Size
 
 	// W denotes the number of uint64 words required to fit m GF_16 elements
 	W = M / 16
@@ -252,6 +260,23 @@ func mulAddMMatPTrans(acc []uint64, m1 []uint64, m2 []uint8) {
 				mulAddPackedIn(acc[W*(r*K+k):], m1[W*pos:], table, W)
 			}
 		}
+	}
+}
+
+func vecAddPacked(in []uint64, acc []uint64) {
+	for i := 0; i < W; i++ {
+		acc[i] ^= in[i]
+	}
+}
+
+func vecMulAddPackedByInvX(p int, in []uint64, acc []uint64) {
+	// Equivalently:
+	// vecMulAddPacked(p, in, 9, acc)
+
+	lsb := uint64(0x1111111111111111)
+	for i := 0; i < p; i++ {
+		t := in[i] & lsb
+		acc[i] ^= ((in[i] ^ t) >> 1) ^ (t * 9)
 	}
 }
 
@@ -612,6 +637,78 @@ func sampleSolution(a []byte, y []byte, r []byte, x []byte) bool {
 	return true
 }
 
+func accumulate(p int, bins [W * 16]uint64, out []uint64) {
+	vecMulAddPackedByInvX(p, bins[W*2:], bins[W*4:])
+	vecMulAddPackedByInvX(p, bins[W*4:], bins[W*8:])
+	vecMulAddPackedByInvX(p, bins[W*8:], bins[W*3:])
+	vecMulAddPackedByInvX(p, bins[W*3:], bins[W*6:])
+	vecMulAddPackedByInvX(p, bins[W*6:], bins[W*12:])
+	vecMulAddPackedByInvX(p, bins[W*12:], bins[W*11:])
+	vecMulAddPackedByInvX(p, bins[W*11:], bins[W*5:])
+	vecMulAddPackedByInvX(p, bins[W*5:], bins[W*10:])
+	vecMulAddPackedByInvX(p, bins[W*10:], bins[W*7:])
+	vecMulAddPackedByInvX(p, bins[W*7:], bins[W*14:])
+	vecMulAddPackedByInvX(p, bins[W*14:], bins[W*15:])
+	vecMulAddPackedByInvX(p, bins[W*15:], bins[W*13:])
+	vecMulAddPackedByInvX(p, bins[W*13:], bins[W*9:])
+	vecMulAddPackedByInvX(p, bins[W*9:], bins[W*1:])
+	copy(out[:W], bins[W*1:])
+}
+
+func calculateTmpU(u []uint64, p1 []uint64, p2 []uint64, p3 []uint64, s []uint8) {
+	var acc [K * N][W * F]uint64
+
+	pos := 0
+	for r := 0; r < V; r++ {
+		for c := r; c < V; c++ {
+			for k := 0; k < K; k++ {
+				vecAddPacked(p1[W*pos:], acc[r*K+k][W*int(s[k*N+c]):])
+			}
+			pos++
+		}
+	}
+
+	pos = 0
+	for r := 0; r < V; r++ {
+		for c := 0; c < O; c++ {
+			for k := 0; k < K; k++ {
+				vecAddPacked(p2[W*pos:], acc[r*K+k][W*int(s[k*N+V+c]):])
+			}
+			pos++
+		}
+	}
+
+	pos = 0
+	for r := 0; r < O; r++ {
+		for c := r; c < O; c++ {
+			for k := 0; k < K; k++ {
+				vecAddPacked(p3[W*pos:], acc[(r+V)*K+k][W*int(s[k*N+V+c]):])
+			}
+			pos++
+		}
+	}
+
+	for i := 0; i < K*N; i++ {
+		accumulate(W, acc[i], u[W*i:])
+	}
+}
+
+func calculateU(u []uint64, s []uint8, pst []uint64) {
+	var acc [K * K][W * F]uint64
+
+	for r := 0; r < K; r++ {
+		for c := 0; c < N; c++ {
+			for k := 0; k < K; k++ {
+				vecAddPacked(pst[W*(c*K+k):], acc[r*K+k][W*int(s[r*N+c]):])
+			}
+		}
+	}
+
+	for i := 0; i < K*K; i++ {
+		accumulate(W, acc[i], u[W*i:])
+	}
+}
+
 // API functions
 
 // Generate the expanded sk. Note that this will be stored in the struct sk.
@@ -693,7 +790,7 @@ func GenerateExpPublic(sk *PrivateKey) *PublicKey {
 
 func KeyPairExpFromSeed(seed []byte) (*PublicKey, *PrivateKey) {
 	if len(seed) != SKSeedSize {
-		panic(fmt.Sprintf("Incorrect lenght. It must be %d", SKSeedSize))
+		panic(fmt.Sprintf("Incorrect lenght %d. It must be %d", len(seed), SKSeedSize))
 	}
 
 	seedBuf := [SKSeedSize]byte{}
@@ -828,19 +925,95 @@ func Sign(msg []byte, sk *PrivateKey, rand io.Reader) ([]byte, error) {
 	return sig[:], nil
 }
 
+func Verify(msg []byte, pk *PublicKey, sig []byte) bool {
+	if len(sig) != SigSize {
+		return false
+	}
+
+	sEnc := sig[:SigSize-SaltSize]
+	salt := sig[SigSize-SaltSize : SigSize]
+
+	// Generate the digest
+	var dig [DigestSize]byte
+
+	h := sha3.NewShake256()
+	_, _ = h.Write(msg[:])
+	_, _ = h.Read(dig[:])
+
+	// Generate the salt
+	h.Reset()
+	_, _ = h.Write(dig[:])
+	_, _ = h.Write(salt[:])
+
+	// Generate t
+	var tEnc [M / 2]byte
+	_, _ = h.Read(tEnc[:])
+
+	var t [M]byte
+	decode(t[:], tEnc[:])
+
+	// Generate s
+	var s [K * N]byte
+	decode(s[:], sEnc[:])
+
+	var tmpU [M * N * K / 16]uint64
+	calculateTmpU(tmpU[:], pk.p1[:], pk.p2[:], pk.p3[:], s[:])
+
+	// compute u
+	var u [M * K * K / 16]uint64
+	calculateU(u[:], s[:], tmpU[:])
+
+	// Emulsify U for Y
+	emulsify(u[:], t[:])
+
+	var zeros [M]byte
+	return bytes.Equal(t[:], zeros[:])
+}
+
+// Packs the public key into buf.
+func (pk *PublicKey) Pack(buf *[PublicKeySize]byte) {
+}
+
+// Packs the public key.
+func (pk *PublicKey) Bytes() []byte {
+	var buf [PublicKeySize]byte
+	copy(buf[:PublicKeySeedSize], pk.pkSeed[:])
+	uint64SliceToBytes(buf[PublicKeySeedSize:], pk.p3[:])
+
+	return buf[:]
+}
+
+func (sk *PrivateKey) Bytes() []byte {
+	var buf [PrivateKeySize]byte
+	copy(buf[:], sk.skSeed[:])
+	return buf[:]
+}
+
 func main() {
 	fmt.Println("Hello, MAYO 1!")
 
-	_, sk, err := GenerateExpandedKeyPair(nil)
+	hexString := "7c9935a0b07694aa0c6d10e4db6b1add2fd81a25ccb14803"
+	seed, err := hex.DecodeString(hexString)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decoding hex string:", err)
+		return
 	}
+	pk, sk := KeyPairExpFromSeed(seed)
 
 	// Prints public and private key
-	//fmt.Printf("%+v\n", sk)
-	//fmt.Printf("%+v\n", pk)
+	fmt.Printf("SK %+x\n", sk.Bytes())
+	fmt.Printf("PK %+x\n", pk.Bytes())
 
-	msg := []byte("Some message")
+	hexString = "d81c4d8d734fcbfbeade3d3f8a039faa2a2c9957e835ad55b22e75bf57bb556ac8"
+	msg, err := hex.DecodeString(hexString)
+	if err != nil {
+		fmt.Println("Error decoding hex string:", err)
+		return
+	}
 	sig, _ := Sign(msg, sk, nil)
-	fmt.Printf("%+v\n", sig)
+	fmt.Printf("Sig %+x\n", sig)
+
+	//if Verify(msg, pk, sig) {
+	//	fmt.Printf("Incorrect sig \n")
+	//}
 }
