@@ -54,11 +54,12 @@ type PublicKey struct {
 	// Can be calculated as  P_i^{(3)} = -OP_i^{(1)}O^\top - OP_i^{(2)}
 }
 
+// The expanded notion of the private key
 type PrivateKey struct {
 	skSeed [SKSeedSize]byte // compacted
 
-	p1      [P1Size / 8]uint64
 	o_bytes [V * O]byte
+	p1      [P1Size / 8]uint64
 	l       [M * V * O / 16]uint64 // The aux matrix = (P_i^(1) + P_i^(1)T) O + P_i^(2)
 }
 
@@ -122,6 +123,49 @@ func mulAddPacked(acc []uint64, inM []uint64, inV byte, w int) {
 	mulAddPackedIn(acc, inM, table, w)
 }
 
+func mulAddMat(acc []uint64, p1 []uint64, o_b []uint8) {
+	// The ordinary summation order is r -> c -> k, but here it is interchanged to make use of multiplication table
+	cols := V
+	for k := 0; k < O; k++ {
+		for c := 0; c < cols; c++ {
+			table := genMultTable(o_b[c*O+k])
+			for r := 0; r <= c; r++ {
+				pos := r*(cols*2-r+1)/2 + (c - r)
+				mulAddPackedIn(acc[W*(r*O+k):], p1[W*pos:], table, W)
+			}
+		}
+	}
+}
+
+func mulAddMatTran(acc []uint64, m1 []uint8, m2 []uint64) {
+	for r := 0; r < O; r++ {
+		for c := 0; c < V; c++ {
+			table := genMultTable(m1[c*O+r])
+			for k := 0; k < V; k++ {
+				mulAddPackedIn(acc[W*(r*V+k):], m2[W*(c*V+k):], table, W)
+			}
+		}
+	}
+}
+
+// Take the upper of the matrix
+func takeUpper(out []uint64, in []uint64, size int) {
+	pos := 0
+	for r := 0; r < size; r++ {
+		for c := r; c < size; c++ {
+			copy(out[W*pos:][:W], in[W*(r*size+c):][:W])
+			if r != c {
+				for p := 0; p < W; p++ {
+					out[W*pos+p] ^= in[W*(c*size+r)+p]
+				}
+			}
+			pos++
+		}
+	}
+}
+
+// Aux functions
+
 // Calculate L_i, with the assumption that P_i^2 is set in the passed variable.
 // We perform: (P^1_i + P^{1\top}) * O
 // Note that (P^1_i + P^{1\top}) forms a symmetric matrix since P^1_i
@@ -144,12 +188,17 @@ func calculateLGivenP2(acc []uint64, p1 []uint64, o_m []uint8) {
 	}
 }
 
+// API functions
+
+// Generate the expanded sk. Note that this will be stored in the struct sk.
 func (sk *PrivateKey) ExpandSK(buf *[SKSeedSize]byte) {
 	copy(sk.skSeed[:], buf[:]) // The seed
 
 	var seedPk [PKSeedSize]byte
 	var oBytes [OSize]byte
 
+	// Note that we don't generate the pkSeed
+	// but we do OBytes. We can refactor so we don't regenerate
 	h := sha3.NewShake256()
 	_, _ = h.Write(sk.skSeed[:])
 	_, _ = h.Read(seedPk[:])
@@ -177,7 +226,48 @@ func (sk *PrivateKey) ExpandSK(buf *[SKSeedSize]byte) {
 	calculateLGivenP2(sk.l[:], sk.p1[:], sk.o_bytes[:])
 }
 
-func KeyPairFromSeed(seed []byte) PrivateKey {
+// Generate the expanded version of the public key
+func GenerateExpPublic(sk *PrivateKey) *PublicKey {
+	var pk PublicKey
+	var o [OSize]byte
+
+	h := sha3.NewShake256()
+	_, _ = h.Write(sk.skSeed[:])
+	_, _ = h.Read(pk.pkSeed[:])
+	_, _ = h.Read(o[:])
+
+	var nonce [16]byte
+	block, _ := aes.NewCipher(pk.pkSeed[:])
+	ctr := cipher.NewCTR(block, nonce[:])
+
+	// TODO: refactor as this is all repeated
+	// Generate P1 and P2
+	var p1 [P1Size]byte
+	var p2 [P2Size]byte
+	ctr.XORKeyStream(p1[:], p1[:])
+	ctr.XORKeyStream(p2[:], p2[:])
+
+	bytesToUint64Slice(pk.p1[:], p1[:])
+	bytesToUint64Slice(pk.p2[:], p2[:])
+
+	var o_bytes [V * O]byte
+	decode(o_bytes[:], o[:])
+
+	var tmp [P2Size / 8]uint64
+	copy(tmp[:], pk.p2[:])
+
+	// Generate P3: -O^T P^(1)_i O − O^T P^(2)_i
+	var p3 [M * O * O / 16]uint64
+	mulAddMat(tmp[:], pk.p1[:], o_bytes[:])
+	mulAddMatTran(p3[:], o_bytes[:], tmp[:])
+
+	// Take only the upper part of P3
+	takeUpper(pk.p3[:], p3[:], O)
+
+	return &pk
+}
+
+func KeyPairExpFromSeed(seed []byte) (*PublicKey, *PrivateKey) {
 	if len(seed) != SKSeedSize {
 		panic(fmt.Sprintf("Incorrect lenght. It must be %d", SKSeedSize))
 	}
@@ -187,13 +277,14 @@ func KeyPairFromSeed(seed []byte) PrivateKey {
 
 	var sk PrivateKey
 
-	sk.ExpandSK(&seedBuf)
+	sk.ExpandSK(&seedBuf) // Expand the sk
+	pk := GenerateExpPublic(&sk)
 
-	return sk
+	return pk, &sk
 }
 
-// GenerateKeyPair generates a key pair.
-func GenerateKeyPair(rand io.Reader) (*PublicKey, *PrivateKey, error) {
+// GenerateExpandedKeyPair generates an expanded key pair.
+func GenerateExpandedKeyPair(rand io.Reader) (*PublicKey, *PrivateKey, error) {
 	var seed [SKSeedSize]byte
 	if rand == nil {
 		rand = cryptoRand.Reader
@@ -203,9 +294,9 @@ func GenerateKeyPair(rand io.Reader) (*PublicKey, *PrivateKey, error) {
 		return nil, nil, err
 	}
 
-	sk := KeyPairFromSeed(seed[:])
+	pk, sk := KeyPairExpFromSeed(seed[:])
 
-	return nil, &sk, nil
+	return pk, sk, nil
 }
 
 func main() {
