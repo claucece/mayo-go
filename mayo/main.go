@@ -39,7 +39,7 @@ const (
 
 	DigestSize = 32
 
-	// W denotes the number of uint64 words required to fit M GF16 elements
+	// W denotes the number of uint64 words required to fit m GF_16 elements
 	W = M / 16
 )
 
@@ -94,6 +94,56 @@ func bytesToUint64Slice(dst []uint64, src []byte) {
 	}
 }
 
+// Matrix operations functions
+
+// Given b (uint8) in GF(16), packs the 32-bit result of (b*x^3, b*x^2, b*x, b) into
+// the returned multiplication table.
+func genMultTable(b uint8) uint32 {
+	pb := uint32(b) * 0x08040201       // represent the polynomial x^3, x^2, x, 1, and distribute b in it
+	hNibble := pb & uint32(0xf0f0f0f0) // isolate the high nibble of each byte
+
+	ret := (pb ^ (hNibble >> 4) ^ (hNibble >> 3)) // mod  by the irreducible x^4+x+1
+
+	return ret
+}
+
+func mulAddPackedIn(acc []uint64, in []uint64, table uint32, b int) {
+	lsbMask := uint64(0x1111111111111111) // mask to extract the lsb
+	for i := 0; i < b; i++ {              // add and mul
+		acc[i] ^= (in[i]&lsbMask)*uint64(table&0xff) ^
+			((in[i]>>1)&lsbMask)*uint64((table>>8)&0xf) ^
+			((in[i]>>2)&lsbMask)*uint64((table>>16)&0xf) ^
+			((in[i]>>3)&lsbMask)*uint64((table>>24)&0xf)
+	}
+}
+
+func mulAddPacked(acc []uint64, inM []uint64, inV byte, w int) {
+	table := genMultTable(inV)
+	mulAddPackedIn(acc, inM, table, w)
+}
+
+// Calculate L_i, with the assumption that P_i^2 is set in the passed variable.
+// We perform: (P^1_i + P^{1\top}) * O
+// Note that (P^1_i + P^{1\top}) forms a symmetric matrix since P^1_i
+// is upper triangular and adding its transpose will result in a matrix where the
+// the upper and lower triangular parts mirror each other.
+func calculateLGivenP2(acc []uint64, p1 []uint64, o_m []uint8) {
+	p1Pos := 0
+	for r := 0; r < V; r++ {
+		for c := r; c < V; c++ {
+			if c == r {
+				p1Pos += 1
+				continue
+			}
+			for k := 0; k < O; k++ {
+				mulAddPacked(acc[W*(r*O+k):], p1[W*p1Pos:], o_m[c*O+k], W)
+				mulAddPacked(acc[W*(c*O+k):], p1[W*p1Pos:], o_m[r*O+k], W)
+			}
+			p1Pos++
+		}
+	}
+}
+
 func (sk *PrivateKey) ExpandSK(buf *[SKSeedSize]byte) {
 	copy(sk.skSeed[:], buf[:]) // The seed
 
@@ -123,7 +173,8 @@ func (sk *PrivateKey) ExpandSK(buf *[SKSeedSize]byte) {
 	bytesToUint64Slice(sk.l[:], p_1_2[P1Size:])
 
 	// compute L_i = (P1 + P1^t)*O + P2
-	//computeL(sk.l[:], sk.p1[:], sk.o_bytes[:], V, O)
+	// Note that sk.l is already set to P2
+	calculateLGivenP2(sk.l[:], sk.p1[:], sk.o_bytes[:])
 }
 
 func KeyPairFromSeed(seed []byte) PrivateKey {
