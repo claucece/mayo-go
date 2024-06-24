@@ -26,7 +26,8 @@ const (
 	M = 64 // The number of multiquadratic polynimials, which all-together are the PK. Always a multiple of 32.
 	O = 8  // The dimension of the oil space. For MAYO, this is < m, which is different than UOV. Note that using this
 	// will mean that we have less degrees of freedom to generate signatures, so we will use it with k.
-	K = 9 // The whipping parameter, to be used on signing to get enough degrees of freedom. For 8 * 9 = 72, which is closer to M.
+	K = 9  // The whipping parameter, to be used on signing to get enough degrees of freedom. For 8 * 9 = 72, which is closer to M.
+	F = 16 // The field
 
 	V = N - O // Aux param for the matrices
 
@@ -40,18 +41,16 @@ const (
 	SKSeedSize = 24 // The size (in bytes) of the seed to generate the sk
 	PKSeedSize = 16 // The public key size
 
-	DigestSize = 32
-	SaltSize   = 24
-	SigSize    = (K*N+1)/2 + SaltSize
-
+	SaltSize          = 24
+	DigestSize        = 32
 	PublicKeySeedSize = 16
-	KeySeedSize       = 24
-	PrivateKeySize    = KeySeedSize
-	PublicKeySize     = PublicKeySeedSize + P3Size
+
+	PrivateKeySize = 24
+	PublicKeySize  = PublicKeySeedSize + P3Size //1168B
+	SigSize        = (K*N+1)/2 + SaltSize       // 321B
 
 	// W denotes the number of uint64 words required to fit m GF_16 elements
-	W = M / 16
-	F = 16
+	W = M / 16 // 4
 )
 
 type PublicKey struct {
@@ -126,17 +125,17 @@ func ctIsGreaterThan(a, b int) uint64 {
 }
 
 func extract(in []uint64, index int) byte {
-	leg := index / 16
+	leg := index / F
 	offset := index & 15
 
 	return byte((in[leg] >> (offset * 4)) & 0xF)
 }
 
 func inverse(a byte) byte {
-	a2 := mul(a, a)
-	a4 := mul(a2, a2)
-	a8 := mul(a4, a4)
-	a6 := mul(a2, a4)
+	a1 := mul(a, a)
+	a3 := mul(a1, a1)
+	a8 := mul(a3, a3)
+	a6 := mul(a1, a3)
 	a14 := mul(a8, a6)
 
 	return a14
@@ -270,9 +269,6 @@ func vecAddPacked(in []uint64, acc []uint64) {
 }
 
 func vecMulAddPackedByInvX(p int, in []uint64, acc []uint64) {
-	// Equivalently:
-	// vecMulAddPacked(p, in, 9, acc)
-
 	lsb := uint64(0x1111111111111111)
 	for i := 0; i < p; i++ {
 		t := in[i] & lsb
@@ -351,10 +347,10 @@ func emulsify(u []uint64, y []uint8) {
 
 	for i := K - 1; i >= 0; i-- {
 		for j := i; j < K; j++ {
-			top := uint8(acc[M/16-1] >> 60)
+			top := uint8(acc[M/F-1] >> 60)
 
-			acc[M/16-1] <<= 4
-			for k := M/16 - 2; k >= 0; k-- {
+			acc[M/F-1] <<= 4
+			for k := M/F - 2; k >= 0; k-- {
 				acc[k+1] ^= acc[k] >> 60
 				acc[k] <<= 4
 			}
@@ -365,18 +361,18 @@ func emulsify(u []uint64, y []uint8) {
 			acc[0] ^= uint64(mul(top, tail[3])) << 12
 			acc[0] ^= uint64(mul(top, tail[4])) << 16
 
-			for k := 0; k < M/16; k++ {
-				acc[k] ^= u[(i*K+j)*(M/16)+k]
+			for k := 0; k < M/F; k++ {
+				acc[k] ^= u[(i*K+j)*(M/F)+k]
 				if i != j {
-					acc[k] ^= u[(j*K+i)*(M/16)+k]
+					acc[k] ^= u[(j*K+i)*(M/F)+k]
 				}
 			}
 		}
 	}
 
-	for i := 0; i < M; i += 16 {
-		a := acc[i/16]
-		for k := 0; k < 16; k++ {
+	for i := 0; i < M; i += F {
+		a := acc[i/F]
+		for k := 0; k < F; k++ {
 			y[i+k] ^= uint8(a & 0xF)
 			a >>= 4
 		}
@@ -389,13 +385,13 @@ func transpose16x16Nibbles(m []uint64) {
 	const even2Bytes = 0x0000ffff0000ffff
 	const evenHalf = 0x00000000ffffffff
 
-	for i := 0; i < 16; i += 2 {
+	for i := 0; i < F; i += 2 {
 		t := ((m[i] >> 4) ^ m[i+1]) & evenNibbles
 		m[i] ^= t << 4
 		m[i+1] ^= t
 	}
 
-	for i := 0; i < 16; i += 4 {
+	for i := 0; i < F; i += 4 {
 		t0 := ((m[i] >> 8) ^ m[i+2]) & evenBytes
 		t1 := ((m[i+1] >> 8) ^ m[i+3]) & evenBytes
 		m[i] ^= (t0 << 8)
@@ -405,11 +401,11 @@ func transpose16x16Nibbles(m []uint64) {
 	}
 
 	for i := 0; i < 4; i++ {
-		t0 := ((m[i] >> 16) ^ m[i+4]) & even2Bytes
-		t1 := ((m[i+8] >> 16) ^ m[i+12]) & even2Bytes
+		t0 := ((m[i] >> F) ^ m[i+4]) & even2Bytes
+		t1 := ((m[i+8] >> F) ^ m[i+12]) & even2Bytes
 
-		m[i] ^= t0 << 16
-		m[i+8] ^= t1 << 16
+		m[i] ^= t0 << F
+		m[i+8] ^= t1 << F
 		m[i+4] ^= t0
 		m[i+12] ^= t1
 	}
@@ -422,31 +418,31 @@ func transpose16x16Nibbles(m []uint64) {
 }
 
 func computeA(m []uint64, _a []byte) {
-	const OKpadded = (O*K + 15) / 16 * 16
+	const OKpadded = (O*K + 15) / F * F
 	var a [(M / 8) * OKpadded]uint64
 	var tail = [5]uint8{8, 0, 2, 8, 0}
 
 	bitsToShift, wordsToShift := 0, 0
 	for i := 0; i < K; i++ {
 		for j := K - 1; j >= i; j-- {
-			mj := m[j*O*M/16:]
+			mj := m[j*O*M/F:]
 
 			for c := 0; c < O; c++ {
-				for k := 0; k < M/16; k++ { // currently 4
-					a[(O*i+c)+(k+wordsToShift)*OKpadded] ^= mj[k+c*M/16] << bitsToShift
+				for k := 0; k < M/F; k++ { // currently 4
+					a[(O*i+c)+(k+wordsToShift)*OKpadded] ^= mj[k+c*M/F] << bitsToShift
 					if bitsToShift > 0 {
-						a[(O*i+c)+(k+wordsToShift+1)*OKpadded] ^= mj[k+c*M/16] >> (64 - bitsToShift)
+						a[(O*i+c)+(k+wordsToShift+1)*OKpadded] ^= mj[k+c*M/F] >> (64 - bitsToShift)
 					}
 				}
 			}
 
 			if i != j {
-				mi := m[i*O*M/16:]
+				mi := m[i*O*M/F:]
 				for c := 0; c < O; c++ {
-					for k := 0; k < M/16; k++ {
-						a[(O*j)+c+(k+wordsToShift)*OKpadded] ^= mi[k+c*M/16] << bitsToShift
+					for k := 0; k < M/F; k++ {
+						a[(O*j)+c+(k+wordsToShift)*OKpadded] ^= mi[k+c*M/F] << bitsToShift
 						if bitsToShift > 0 {
-							a[(O*j)+c+(k+wordsToShift+1)*OKpadded] ^= mi[k+c*M/16] >> (64 - bitsToShift)
+							a[(O*j)+c+(k+wordsToShift+1)*OKpadded] ^= mi[k+c*M/F] >> (64 - bitsToShift)
 						}
 					}
 				}
@@ -460,7 +456,7 @@ func computeA(m []uint64, _a []byte) {
 		}
 	}
 
-	for c := 0; c < OKpadded*((M+(K+1)*K/2+15)/16); c += 16 {
+	for c := 0; c < OKpadded*((M+(K+1)*K/2+15)/F); c += F {
 		transpose16x16Nibbles(a[c:])
 	}
 
@@ -474,15 +470,15 @@ func computeA(m []uint64, _a []byte) {
 
 	const lsb = 0x1111111111111111
 
-	for c := 0; c < OKpadded; c += 16 {
+	for c := 0; c < OKpadded; c += F {
 		for r := M; r < M+(K+1)*K/2; r++ {
-			pos := (r/16)*OKpadded + c + (r & 15)
+			pos := (r/F)*OKpadded + c + (r & 15)
 			t0 := a[pos] & lsb
 			t1 := (a[pos] >> 1) & lsb
 			t2 := (a[pos] >> 2) & lsb
 			t3 := (a[pos] >> 3) & lsb
 			for t := 0; t < len(tail); t++ {
-				a[((r+t-M)/16)*OKpadded+c+((r+t)&15)] ^= t0*uint64(tab[4*t+0]) ^ t1*uint64(tab[4*t+1]) ^ t2*uint64(tab[4*t+2]) ^ t3*uint64(tab[4*t+3])
+				a[((r+t-M)/F)*OKpadded+c+((r+t)&15)] ^= t0*uint64(tab[4*t+0]) ^ t1*uint64(tab[4*t+1]) ^ t2*uint64(tab[4*t+2]) ^ t3*uint64(tab[4*t+3])
 			}
 		}
 	}
@@ -492,29 +488,29 @@ func computeA(m []uint64, _a []byte) {
 	uint64SliceToBytes(aBytes[:], a[:])
 
 	KO1 := K*O + 1
-	for r := 0; r < M; r += 16 {
-		for c := 0; c < KO1-1; c += 16 {
-			for i := 0; i < 16; i++ {
-				src := aBytes[(r/16*OKpadded+c+i)*8:]
+	for r := 0; r < M; r += F {
+		for c := 0; c < KO1-1; c += F {
+			for i := 0; i < F; i++ {
+				src := aBytes[(r/F*OKpadded+c+i)*8:]
 				offset := KO1*(r+i) + c
-				decode(_a[offset:offset+min(16, KO1-1-c)], src)
+				decode(_a[offset:offset+min(F, KO1-1-c)], src)
 			}
 		}
 	}
 }
 
 func ef(A []byte, nrows, ncols int) {
-	rowLen := (ncols + 15) / 16
+	rowLen := (ncols + 15) / F
 
-	var pivotRowData [(K*O + 1 + 15) / 16]uint64 // rounds up
-	var pivotRowData2 [(K*O + 1 + 15) / 16]uint64
+	var pivotRowData [(K*O + 1 + 15) / F]uint64 // rounds up
+	var pivotRowData2 [(K*O + 1 + 15) / F]uint64
 
-	var packedAbyte [((K*O + 1 + 15) / 16) * M * 8]byte
+	var packedAbyte [((K*O + 1 + 15) / F) * M * 8]byte
 	for i := 0; i < nrows; i++ {
 		encode(packedAbyte[i*rowLen*8:], A[i*ncols:], ncols)
 	}
 
-	var packedA [((K*O + 1 + 15) / 16) * M]uint64
+	var packedA [((K*O + 1 + 15) / F) * M]uint64
 	bytesToUint64Slice(packedA[:], packedAbyte[:])
 
 	pivotRow := 0
@@ -571,7 +567,7 @@ func ef(A []byte, nrows, ncols int) {
 	uint64SliceToBytes(packedAbyte[:], packedA[:])
 
 	for i := 0; i < nrows; i++ {
-		decode(temp[:rowLen*16], packedAbyte[i*rowLen*8:])
+		decode(temp[:rowLen*F], packedAbyte[i*rowLen*8:])
 		for j := 0; j < ncols; j++ {
 			A[i*ncols+j] = temp[j]
 		}
@@ -637,7 +633,7 @@ func sampleSolution(a []byte, y []byte, r []byte, x []byte) bool {
 	return true
 }
 
-func accumulate(p int, bins [W * 16]uint64, out []uint64) {
+func accumulate(p int, bins [W * F]uint64, out []uint64) {
 	vecMulAddPackedByInvX(p, bins[W*2:], bins[W*4:])
 	vecMulAddPackedByInvX(p, bins[W*4:], bins[W*8:])
 	vecMulAddPackedByInvX(p, bins[W*8:], bins[W*3:])
@@ -658,6 +654,7 @@ func accumulate(p int, bins [W * 16]uint64, out []uint64) {
 func calculateTmpU(u []uint64, p1 []uint64, p2 []uint64, p3 []uint64, s []uint8) {
 	var acc [K * N][W * F]uint64
 
+	// P1
 	pos := 0
 	for r := 0; r < V; r++ {
 		for c := r; c < V; c++ {
@@ -668,6 +665,7 @@ func calculateTmpU(u []uint64, p1 []uint64, p2 []uint64, p3 []uint64, s []uint8)
 		}
 	}
 
+	// P2
 	pos = 0
 	for r := 0; r < V; r++ {
 		for c := 0; c < O; c++ {
@@ -678,6 +676,7 @@ func calculateTmpU(u []uint64, p1 []uint64, p2 []uint64, p3 []uint64, s []uint8)
 		}
 	}
 
+	// P3
 	pos = 0
 	for r := 0; r < O; r++ {
 		for c := r; c < O; c++ {
@@ -693,13 +692,13 @@ func calculateTmpU(u []uint64, p1 []uint64, p2 []uint64, p3 []uint64, s []uint8)
 	}
 }
 
-func calculateU(u []uint64, s []uint8, pst []uint64) {
+func calculateU(u []uint64, s []uint8, tmpU []uint64) {
 	var acc [K * K][W * F]uint64
 
 	for r := 0; r < K; r++ {
 		for c := 0; c < N; c++ {
 			for k := 0; k < K; k++ {
-				vecAddPacked(pst[W*(c*K+k):], acc[r*K+k][W*int(s[r*N+c]):])
+				vecAddPacked(tmpU[W*(c*K+k):], acc[r*K+k][W*int(s[r*N+c]):])
 			}
 		}
 	}
@@ -743,6 +742,8 @@ func (sk *PrivateKey) ExpandSK(buf *[SKSeedSize]byte) {
 	bytesToUint64Slice(sk.l[:], p_1_2[P1Size:])
 
 	// compute L_i = (P1 + P1^t)*O + P2
+	// This is the "hint" of the signature, which later will be used to check 'Lx = t -y'
+	// This is a square matrix
 	// Note that sk.l is already set to P2
 	calculateLGivenP2(sk.l[:], sk.p1[:], sk.o_bytes[:])
 }
@@ -881,6 +882,7 @@ func Sign(msg []byte, sk *PrivateKey, rand io.Reader) ([]byte, error) {
 		decode(r[:], rs[:])
 
 		// M_i[j, :] = v_i^\top L_j . Set the rows
+		// Compute the 'v' part of the the signature with the hint
 		var mTmp [M * K * O / F]uint64
 		mulAddMatP(mTmp[:], v[:], sk.l[:], K, V, O)
 
@@ -939,9 +941,9 @@ func Verify(msg []byte, pk *PublicKey, sig []byte) bool {
 	h := sha3.NewShake256()
 	_, _ = h.Write(msg[:])
 	_, _ = h.Read(dig[:])
+	h.Reset()
 
 	// Generate the salt
-	h.Reset()
 	_, _ = h.Write(dig[:])
 	_, _ = h.Write(salt[:])
 
@@ -956,11 +958,11 @@ func Verify(msg []byte, pk *PublicKey, sig []byte) bool {
 	var s [K * N]byte
 	decode(s[:], sEnc[:])
 
-	var tmpU [M * N * K / 16]uint64
+	var tmpU [M * N * K / F]uint64
 	calculateTmpU(tmpU[:], pk.p1[:], pk.p2[:], pk.p3[:], s[:])
 
 	// compute u
-	var u [M * K * K / 16]uint64
+	var u [M * K * K / F]uint64
 	calculateU(u[:], s[:], tmpU[:])
 
 	// Emulsify U for Y
@@ -970,11 +972,7 @@ func Verify(msg []byte, pk *PublicKey, sig []byte) bool {
 	return bytes.Equal(t[:], zeros[:])
 }
 
-// Packs the public key into buf.
-func (pk *PublicKey) Pack(buf *[PublicKeySize]byte) {
-}
-
-// Packs the public key.
+// Returns the bytes of the public key.
 func (pk *PublicKey) Bytes() []byte {
 	var buf [PublicKeySize]byte
 	copy(buf[:PublicKeySeedSize], pk.pkSeed[:])
@@ -983,6 +981,7 @@ func (pk *PublicKey) Bytes() []byte {
 	return buf[:]
 }
 
+// Returns the bytes of the secret key.
 func (sk *PrivateKey) Bytes() []byte {
 	var buf [PrivateKeySize]byte
 	copy(buf[:], sk.skSeed[:])
@@ -991,6 +990,7 @@ func (sk *PrivateKey) Bytes() []byte {
 
 func main() {
 	fmt.Println("Hello, MAYO 1!")
+	fmt.Println("")
 
 	hexString := "7c9935a0b07694aa0c6d10e4db6b1add2fd81a25ccb14803"
 	seed, err := hex.DecodeString(hexString)
@@ -1001,8 +1001,8 @@ func main() {
 	pk, sk := KeyPairExpFromSeed(seed)
 
 	// Prints public and private key
-	fmt.Printf("SK %+x\n", sk.Bytes())
-	fmt.Printf("PK %+x\n", pk.Bytes())
+	fmt.Printf("SK: %+x\n", sk.Bytes())
+	fmt.Printf("PK: %+x\n", pk.Bytes())
 
 	hexString = "d81c4d8d734fcbfbeade3d3f8a039faa2a2c9957e835ad55b22e75bf57bb556ac8"
 	msg, err := hex.DecodeString(hexString)
@@ -1010,10 +1010,15 @@ func main() {
 		fmt.Println("Error decoding hex string:", err)
 		return
 	}
-	sig, _ := Sign(msg, sk, nil)
-	fmt.Printf("Sig %+x\n", sig)
 
-	//if Verify(msg, pk, sig) {
-	//	fmt.Printf("Incorrect sig \n")
-	//}
+	fmt.Println("")
+	sig, _ := Sign(msg, sk, nil)
+	fmt.Printf("SIGNATURE: %+x\n", sig)
+
+	fmt.Println("")
+	if !Verify(msg, pk, sig) {
+		fmt.Println("Incorrect sig!")
+	} else {
+		fmt.Println("Correctly verified!")
+	}
 }
