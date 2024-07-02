@@ -78,7 +78,7 @@ type PrivateKey struct {
 // dst := make([]byte, 4)
 // decode(dst, src)
 // src[0] is 0xAB (10101011 in binary).
-// dst[0] = 0xAB & 0x0F = 0x0B (00001011 & 00001111 = 00001011).
+// dst[0] = 0xAB & 0x0F = 0x0B (10101011 & 00001111 = 00001011).
 // dst[1] = 0xAB >> 4 = 0x0A (10101011 >> 4 = 00001010).
 // src[1] is 0xCD (11001101 in binary).
 // dst[2] = 0xCD & 0x0F = 0x0D (11001101 & 00001111 = 00001101).
@@ -97,12 +97,19 @@ func decode(dst []byte, src []byte) {
 	}
 }
 
-func encode(dst []byte, src []byte, length int) {
+// 4-bit nibbles from the src array are combined into single bytes in the
+// dst array
+// Example: src = [0x1, 0x2, 0x3, 0x4]
+// l = 4
+// First iteration: dst[0] = (0x1 << 0) | (0x2 << 4) = 0x1 | 0x20 = 0x21 (binary: 00100001)
+// Second: dst[1] = (0x3 << 0) | (0x4 << 4) = 0x3 | 0x40 = 0x43 (binary: 01000011)
+// dst = [0x21, 0x43]
+func encode(dst []byte, src []byte, l int) {
 	var i int
-	for i = 0; i+1 < length; i += 2 {
+	for i = 0; i+1 < l; i += 2 { // two bytes at the time
 		dst[i/2] = (src[i+0] << 0) | (src[i+1] << 4)
 	}
-	if length&1 == 1 {
+	if l&1 == 1 { // handle the odd
 		dst[i/2] = (src[i+0] << 0)
 	}
 }
